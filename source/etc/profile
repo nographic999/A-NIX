@@ -1,0 +1,16 @@
+# profile - the shell's environment and aliases, loaded at every shell
+# start, after /etc/anix.conf (a value here wins over the same one there).
+# Board and service settings live in /etc/anix.conf - see `conf`.
+# Plain KEY=VALUE lines only (no $VAR expansion here). "none" = unset.
+export PATH=/bin
+export HOME=/root
+
+# Prompt history: lines kept, and the file (none = don't save)
+export HISTSIZE=50
+export HISTFILE=/var/history
+
+# Aliases: a short name for a longer command
+alias ll=ls -l
+alias ..=cd ..
+alias ed=edit
+alias restart=reboot

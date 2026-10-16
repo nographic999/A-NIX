@@ -1,0 +1,1336 @@
+ANIX(1)                  A-NIX 0.1T Manual                  ANIX(1)
+
+NAME
+    anix - a small *NIX-style command shell for the
+    Raspberry Pi Pico, Pico W, Pico 2 and Pico 2 W, running under
+    MicroPython. Version 0.1T.
+
+SYNOPSIS
+    The board starts the shell at every power-on and reset. Programs
+    that should start by themselves go in /etc/crontab (@boot lines).
+    Hold BOOTSEL while it starts for safe mode: the shell without
+    /etc/profile, /etc/startup, /etc/crontab and the watchdog.
+
+DESCRIPTION
+    A-NIX is an interactive shell with a small *NIX-flavored
+    layout: a $PATH of standalone programs under /bin (one file
+    per command, exec'd on demand, exactly the way a real *NIX
+    shell resolves and runs a command it found on PATH), a small
+    set of true shell builtins that need the shell's own process
+    state (cd, export, ...), environment variables, and shell
+    scripts with if/elif/else, for and while loops (nestable).
+
+    It is not a full POSIX shell - one interpreter (shell.py, in
+    /lib) reads a line, splits it into words ("quotes" group words),
+    and either runs a builtin directly or execs the matching /bin
+    file. Output can go to a file (> >>) or into the next command
+    (|). No subshells; one background job (cmd &), no fg/bg.
+
+STARTUP SEQUENCE
+    /boot.py and /main.py run on every power-up/reset (must stay at
+    the filesystem root - the firmware only auto-runs files found
+    there).
+
+    boot.py drives low every output pin left high (after a power-on
+    they already are; after a soft reset - Ctrl-D, Thonny, mpremote -
+    outputs keep their state), and sets up BOOTSEL and the status LED
+    for main.py. It runs on every start, also after a soft reset.
+
+    main.py blinks the LED once, logs the boot, checks BOOTSEL (held
+    -> safe mode) and starts the shell. It is skipped after a soft
+    reset from a raw-REPL tool (Thonny, mpremote).
+
+    Inside the shell:
+      1. ENV starts empty; /etc/anix.conf (settings), then
+         /etc/profile (HOME, PATH, aliases) load; the shell watchdog
+         starts if WATCHDOG=on.
+      2. The shell changes into $HOME.
+      3. /etc/startup runs as a startup script.
+      4. cron reads /etc/crontab and runs its @boot lines, in order
+         (once per board start, not again on `exit`).
+      5. The interactive prompt starts.
+
+    `exit` restarts the shell from step 1 (output pins stay as they
+    are - a background job keeps its pins). Ctrl-C at the prompt
+    leaves to the raw REPL (Thonny and mpremote rely on that to
+    connect); Ctrl-D there soft-resets and runs boot.py/main.py again.
+
+    Every boot is logged; BOOTSEL gives a safe mode - see SAFE MODE
+    AND THE BOOT LOG, below.
+
+FILESYSTEM
+    /                 boot.py, main.py (must stay at the root)
+    /lib/shell.py     the shell itself - the only file meant to be
+                      imported rather than run by name
+    /bin              every command but the builtins below - one
+                      file per program, found via $PATH like a real
+                      *NIX /bin
+    /root             $HOME - where cd with no argument goes
+    /etc/anix.conf    settings: WiFi, passwords, pins, logs, RAM,
+                      watchdog - see `conf` and SETTINGS
+    /etc/profile      shell environment (PATH, HOME, history) and
+                      aliases, loaded after anix.conf
+    /lib/script.py    the script language, loaded when a script runs
+    /etc/startup      script run at every shell start
+    /var/log          boot log and safe-mode state (see dmesg)
+    /usr/share/man/anix        this page
+    /usr/share/doc/copyright   license text (see `license`)
+
+ENVIRONMENT
+    Variables live only in the running shell's ENV dict - they do
+    not persist across reboot on their own. Put anything you want
+    every session in /etc/profile (export lines; read at every shell
+    start). Board and service settings live in /etc/anix.conf - see
+    SETTINGS; both files are read the same way, profile last.
+    Commands to run at every start go in /etc/startup.
+    Reference as $NAME or ${NAME}; an undefined name is left
+    unexpanded rather than becoming empty.
+
+    HOME    Home directory. Set by /etc/profile. Used by `cd` with
+            no argument.
+    PATH    Colon-separated search list for bare command names not
+            found in cwd. Default /bin. Extend with, e.g.:
+                export PATH=/bin:/root
+            A name containing "/" is never PATH-searched.
+    PS1     Prompt template. Unset = "$cwd $ " (the folder bold
+            blue, see COLOURS). $VAR/${VAR} expand;
+            the literal "\w" becomes the current directory:
+                export PS1=\w>
+    LINES, COLUMNS
+            Screen size. Normally leave unset: the shell, `edit` and
+            the dialogs ask the terminal for its real size. Set them
+            only for a terminal that can't answer (`pg` uses LINES).
+    HISTSIZE, HISTFILE
+            How many prompt lines history keeps (default 50) and the
+            file they're saved in (/etc/profile sets /var/history -
+            outside /root, so clearing /root keeps it; none = not
+            saved). Note: commands with passwords are saved too.
+    TZ      Hours added to UTC by `date ntp`, e.g. 2 (Lithuanian
+            winter time) or 3 (summer time).
+    I2C_SDA, I2C_SCL, I2C_FREQ
+            Default pins and clock for `i2c` (4, 5, 100000).
+    WIFI_SSID, WIFI_PASS
+            Read by `wifi` with no arguments, so you can just type
+            `wifi` instead of `wifi myssid mypass` every time. Set
+            with `conf` if this board always joins one network.
+    WIFI_COUNTRY
+            Two-letter country code for the WiFi radio, e.g. LT.
+            Without it the radio uses worldwide settings and may
+            not see networks on channels 12-13 (allowed in Europe).
+    WEB_PINS
+            Comma-separated list read by `httpd` with no pin
+            arguments (see COMMANDS, httpd, below, for the
+            ADCn/INn/PWMn/plain syntax it expects). none = no
+            pins: the panel is only the file browser.
+    HTTPD_FILES
+            on (default) / off: the file browser in the httpd panel.
+    HTTPD_PASS, TELNET_PASS
+            Passwords for httpd and telnetd (plain text; a -p
+            option on the command wins). none = -p is required.
+    COLOR   on / off: colours on the screen - see COLOURS.
+
+EXPANSIONS
+    $?          exit status of the last command - "0" ok, "1" a
+                command reported an error
+    $((expr))   arithmetic: + - * / // % and parens; bare names
+                (no $) pull from ENV, matching real sh arithmetic
+    ${VAR}, $VAR   environment variable, braced or bare form
+    $(command)     the command's output, newlines as spaces:
+                   echo now: $(date)   log t.csv $(temp)
+    $1..$9 $# $@ $0   arguments of the running script or function:
+                   the 1st..9th, how many, all of them, its name
+    "a b" 'a b'    quotes make one argument of several words; a
+                   quoted argument is never glob-expanded (find .
+                   "*.py") and never a redirection. Variables are
+                   expanded inside quotes too.
+    < file         the command reads file as its input, as from a
+                   pipe: sort < names.txt   read LINE < cfg.txt
+    2> file        send the command's errors to file (2>> appends)
+    2>&1           errors go where the output goes (a file or pipe)
+    > /dev/null    throw output away (2> /dev/null: errors)
+    > file         send a command's output to file (replaces it).
+                   Written safely: a temporary file replaces the old
+                   one only when the command finishes - Ctrl-C or a
+                   power cut leaves the old file. (So `cat a > a`
+                   keeps a, unlike most shells.)
+    >> file        append a command's output to file. Errors still
+                   go to the screen. If the file doesn't end with a
+                   line break, one is added first, so a new line
+                   never sticks to the old last one. Works for
+                   builtins and /bin commands alike: ls -l > list.txt
+    a ; b          run a, then b
+    a && b         run b only if a worked ($? = 0)
+    a || b         run b only if a failed - e.g.
+                   wifi && date ntp || echo no network
+                   ; && || bind weaker than |, so each side may be a
+                   pipe; a trailing & sends the whole line to the
+                   background
+    cmd &          run cmd in the background - see BACKGROUND JOB
+    a | b          pipe: a's output becomes b's input. Commands
+                   that read text read the pipe when given no file:
+                   cat grep head tail wc sort uniq cut replace tee
+                   hexdump sha256. Chains work:
+                   cat log.txt | grep error | tail -n 5
+                   Data passes in RAM up to 8 KB, beyond that through
+                   a temporary file in /var/tmp. Errors go to the
+                   screen, not into the pipe.
+
+ALIASES
+    alias name=command   `ll` then runs `ls -l`; arguments typed
+                         after an alias are added: ll /bin
+    alias                list them      unalias name   remove one
+    Aliases last until the shell restarts; put `alias` lines in
+    /etc/profile to keep them (two examples are there: ll and ..).
+    An alias may use another alias.
+
+BACKGROUND JOB
+    cmd &           runs cmd on the second core; the prompt is free
+                    at once. jobs shows it, kill stops it; when it
+                    ends, the prompt says so with its $?.
+    One job at a time, and not while tasks or another core-1 program
+    run (see CORE 1). Its output is kept in RAM and written to
+    /var/log/job.log by the shell on core 0, unless the command has
+    its own > file - and new lines of it appear above
+    the prompt by themselves, [1] in front, within about a second
+    while you aren't typing (what you typed is kept). jobs -f
+    follows the output live until the job ends or you press a key.
+    Commands that need the keyboard or the screen (edit, watch,
+    man ...) are refused. kill takes effect at the job's next output
+    line or next command - a command busy without printing (a long
+    wget) finishes that step first. The job's $? doesn't change yours.
+    Example:
+        wget http://server/big.bin &
+        sh-loop.sh > readings.txt &
+
+TASK SCHEDULER
+    spawn file.py [args]   start a task         tasks   list them
+    stop N / stop all      end tasks      tasks log   what they print
+    Several of your own programs run together on core 1 while the
+    shell stays free. A task file needs an async run:
+        import asyncio, machine
+        async def run(args):
+            led = machine.Pin("LED", machine.Pin.OUT)
+            while True:
+                led.toggle()
+                await asyncio.sleep(0.5)
+    Each await lets the other tasks run - never use time.sleep() or a
+    long loop without await in a task: it freezes them all. print()
+    goes to /var/log/tasks.log ([N] prefix). An error ends only that
+    task (traceback in the log); print() goes through RAM, the shell
+    on core 0 writes the log (more than 4 KB while the shell is busy
+    is dropped with a note). When the last task ends, core 1 is free
+    again. Core 1 is shared: no `cmd &` while tasks run (see CORE 1).
+    The prompt shows (N) while N tasks run. Start tasks at boot from
+    /etc/startup, or @boot spawn x.py in /etc/crontab.
+
+CORE 1
+    Core 0 runs the shell, cron, telnetd and httpd. Core 1 runs ONE
+    program at a time: the background job (cmd &), the task
+    scheduler (spawn), or a program of your own. `ps` shows which.
+
+    All of them start through /lib/core1.py. Core 1's stack must be
+    one free block of RAM; when RAM is in pieces there may be none of
+    16 KB although `free` shows plenty (its "largest free block" line
+    tells). MicroPython 1.29 has a bug: a start that can't get its
+    stack leaves core 1 blocked until the next reset. So A-NIX first
+    checks that the block exists - 16 KB, else 12 (jobs and tasks need
+    at least 12), else 8 for your own simple programs - and only then
+    starts. If none exists: "no free block ... reboot" - start core-1
+    programs early, e.g. as the first @boot line, before WiFi.
+
+    The filesystem is not safe with both cores in it at once. A-NIX
+    keeps core 1 off it: job and task output go through RAM, and
+    loading commands and scripts (core 1) and writing logs and the
+    history (core 0) take turns (a lock). A program's OWN file reads
+    and writes on core 1 are not covered - load what it needs before
+    it starts, and keep its messages in RAM.
+
+    Your own program on core 1, from a .py command:
+        import core1
+        kb, why = core1.start(loop, (), "my program")
+    core1.busy() says what runs there.
+
+COMPILED PROGRAMS (.mpy)
+    A program can be a compiled .mpy file instead of .py: typing its
+    name, `run` and $PATH all find it (a .py of the same name is
+    used first while both exist). Compile on a PC with mpy-cross of
+    the SAME version as the board's MicroPython (see uname):
+        pip install mpy-cross==1.29.0
+        mpy-cross myprog.py          -> myprog.mpy
+    .mpy files load faster and need much less RAM - the board skips
+    compiling. /lib modules can be .mpy too (delete the .py). A .mpy
+    can't be edited on the board, and its name must not be the same
+    as a module (shell, net, os, ...): the shell refuses that.
+
+THE PROMPT
+    Up / Down          previous / next command (history)
+    Left / Right       move in the line   Home / End (or ^A / ^E)
+    Backspace / Del    delete             ^U / ^K  delete to start/end
+    Tab                complete a command or file name; a second
+                       Tab lists all matches
+    ^L                 clear the screen
+    Ctrl-C             while a command runs: stop it ($? = 130).
+                       At the prompt: leave to the raw REPL (Ctrl-D
+                       there restarts) - Thonny and mpremote rely
+                       on this to connect.
+
+    History is saved to HISTFILE after every command and loaded at
+    shell start. `history` lists it numbered (`history 20`: the last
+    20, `history -c`: clear it). Typed at the prompt:
+        !!        run the last command again
+        !N        run command number N (from `history`)
+        !-N       the N-th last command
+        !text     the last command starting with text
+    The recalled command is shown before it runs. A line longer
+    than the screen scrolls sideways.
+
+COLOURS
+    Like a Linux terminal (the default dircolors, grep --color and
+    diff --color colours), only on the screen - never in a > file, a
+    pipe, $(...), the background job's log or cron.log, so files stay
+    plain text. `conf COLOR off` turns them all off, for a terminal
+    that shows codes like [01;34m instead (Thonny's shell);
+    `conf COLOR on` brings them back.
+
+    banner      A-NIX bold cyan, the version bold yellow, the
+                tagline magenta; the safe-mode notice yellow
+    prompt      the folder bold blue; [N] job yellow, (low RAM) red
+    ls, tree    folders bold blue, .py .mpy .sh bold green, archives
+                and firmware (.zip .gz .tar .uf2 .bin) bold red,
+                images (.png .jpg .gif .bmp) bold magenta
+    grep        the match bold red, file name magenta, -n line
+                number green
+    diff        < removed lines red, > added green, 3c3 lines cyan
+    error:      bold red, for every command
+    dmesg       times green, a watchdog/unknown start and the crash
+                details under it red, safe mode yellow
+    selftest    ok green, WARN yellow, FAIL bold red
+    cron, jobs, tasks, telnetd status, httpd status
+                running and $?=0 green, failed and $?=1 red,
+                stopped grey
+    wifi status, scan   Connected green, addresses magenta, signal
+                green (strong) / yellow / red (weak), open yellow
+    pins        a pin reading 1 bold green
+    hexdump     bytes coloured by kind (see HEXDUMP(1))
+    man         headings bold
+    edit        syntax colours like nano - see THE EDIT EDITOR
+
+COMMANDS
+    Builtins touch the shell's own process state (current directory,
+    ENV) so, same as in a real sh, they can't be separate files -
+    a child process can't change its parent's cwd or variables.
+    Everything else lives in /bin and is found via $PATH.
+
+CD(1)
+    cd [path]           change directory (no path = $HOME)
+
+PWD(1)
+    pwd                 print the current directory
+
+ECHO(1)
+    echo [text]         print text
+    echo [text] > file  overwrite file with text
+    echo [text] >> file appends text to file
+
+    Prints text exactly as typed - internal spacing (for column
+    alignment, indentation) is preserved, unlike a command's normal
+    arguments where repeated spaces collapse to one. Trade-off: * and
+    ? in text print literally rather than matching files, since
+    there's no tokenizing left to tell a pattern from plain text.
+
+EXPORT(1)
+    export              list all variables
+    export KEY          show one variable
+    export KEY=VAL      set a variable
+
+UNSET(1)
+    unset KEY           remove a variable
+
+READ(1)
+    read [VAR]          wait for Enter, or capture a line into VAR
+                        (no prompt printed - echo your own first).
+                        With < file or a pipe: VAR = its first line
+
+LET(1)
+    let VAR=expr        set VAR to an arithmetic result (as in ksh)
+
+TIME(1)
+    time cmd [args]     run cmd, then show how long it took
+                        (time "a | b" for a pipe)
+
+JOBS(1)
+    jobs                the background job and its state
+    jobs -f             follow its output live; any key stops following
+
+KILL(1)
+    kill                stop the background job
+
+SPAWN(1)
+    spawn file [args]   start an async program as a task - see TASK
+                        SCHEDULER
+
+TASKS(1)
+    tasks               list tasks; tasks log [N]: what they printed;
+                        tasks clean: forget finished ones
+
+STOP(1)
+    stop N | stop all   end a task / all tasks
+
+SOURCE(1), .(1)
+    source file.sh      run a script in this shell - its variables,
+    . file.sh           functions, aliases and cd stay. (Every A-NIX
+                        script runs that way - there are no
+                        subshells - so this is the same as running it
+                        by name, but takes any file name and never
+                        searches $PATH.)
+
+EXIT(1)
+    exit                restart the shell (fresh ENV, output pins
+                        driven low). Ctrl-C at the prompt leaves to
+                        the raw REPL instead.
+
+    /bin - one file per program, classic *NIX names used where
+    this project has a real equivalent:
+
+LS(1)
+    ls [-l] [path...]  list directory contents, coloured like Linux
+                        (see COLOURS); accepts * and ?
+                        globs); several folders each get a heading,
+                        -a is accepted (every entry is always
+                        shown). Bare `ls` fills the terminal width
+                        column by column (like real ls with no -l);
+                        `-l` switches to one entry per line with a
+                        d/- type flag and size, same idea as real
+                        ls -l's mode+size columns without the actual
+                        permission bits this filesystem doesn't have
+
+CAT(1)
+    cat file...         print files' contents (cat a > b copies)
+
+CP(1)
+    cp [-r] src... dst  copy file(s); -r for directories
+
+MV(1)
+    mv src... dst       move/rename file(s) into a directory
+
+RM(1)
+    rm [-r] file...     remove file(s); -r for directories
+
+MKDIR(1)
+    mkdir dir           create a directory
+
+RMDIR(1)
+    rmdir dir           remove an empty directory
+
+PG(1)
+    pg file             page a file, LINES lines at a time, Enter
+                        to continue, q to stop (was more/less - SVR
+                        pagers were pg, not more)
+
+DIFF(1)
+    diff file1 file2    show the lines that differ, like the real
+                        diff: an inserted or deleted line shows up
+                        as just that change. Normal diff format -
+                        3c3 changed, 5a6,7 added, 8,9d7 deleted;
+                        < old line, > new line. Prints nothing if
+                        the files are identical. $? is 0 identical,
+                        1 different, 2 trouble (missing file, or
+                        too many changed lines to compare in RAM)
+
+GREP(1)
+    grep [-i] [-v] [-n] [-c] [-q] "text" file...   print lines that
+                        contain text (or from a pipe: ls | grep .py).
+                        -i any case, -v lines without it, -n line
+                        numbers, -c only a count, -q nothing at all
+                        (for if/&&). $? 1 if none
+
+HEXDUMP(1)
+    hexdump [-s START] [-n LEN] [-p] file   bytes in hex and as text,
+                        16 per line (8 on a narrow screen), coloured
+                        by kind: 00 grey, text normal, space/CR/LF
+                        green, control magenta, 80-FF yellow; repeated
+                        lines shown once as *. -p: no colour (also
+                        none into a file or pipe, or with COLOR=off).
+                        Also: cmd | hexdump
+
+SHA256(1)
+    sha256 file...      SHA-256 checksums, like sha256sum
+    sha256 file SUM     check a file against a known checksum:
+                        OK or FAILED ($? = 1). Also: cmd | sha256
+
+SORT(1)
+    sort [-r] [-n] [-u] [file]   sort lines: -r reverse, -n by
+                        number, -u drop repeats. Holds all lines in
+                        RAM
+
+UNIQ(1)
+    uniq [-c] [file]    drop repeated lines that follow each other
+                        (-c: count them); sort | uniq drops all
+
+CUT(1)
+    cut -f LIST [-d SEP] [file]  fields split at SEP (default tab;
+                        -d , for CSV, -d " " for spaces)
+    cut -c LIST [file]  characters. LIST: 2  1,3  2-4  3-
+
+TEE(1)
+    ... | tee [-a] file pass the pipe on AND save a copy (-a
+                        appends): ls | tee list.txt | wc
+
+REPLACE(1)
+    replace [-i] "old" "new" file  replace text in the file (written
+                        safely), print how many; $? 1 if none
+    ... | replace [-i] "old" "new" change piped text. -i any case;
+                        "new" can be "" to delete
+
+HEAD(1)
+    head [-n N] file    first N lines (default 10); head -5 works too
+
+TAIL(1)
+    tail [-n N] file    last N lines (default 10); tail -5 works too
+
+WC(1)
+    wc file...          lines, words and bytes (plus a total)
+
+TOUCH(1)
+    touch file...       create empty files (existing ones untouched)
+
+FIND(1)
+    find [path] ["pattern"]   list everything below path (default
+                        .) whose name matches pattern (* and ?);
+                        quote the pattern so the shell doesn't
+                        expand it. Directories end in /
+
+DU(1)
+    du [path]           size of every folder below path, and total
+    du -s [path]        only the total       du -a: files too
+
+STAT(1)
+    stat path...        type, size and last change of files
+
+WHICH(1)
+    which name...       what a name runs: alias, builtin, or file
+
+SEQ(1)
+    seq [first [step]] last   numbers, one per line: seq 5,
+                        seq 0 0.5 2, seq 10 1
+
+TRUE(1)
+    true                do nothing, $? 0       false: $? 1
+
+FALSE(1)
+    false               do nothing, $? 1 (for && / || and scripts)
+
+LOG(1)
+    log [-n] file [values]   append "date time,value,value" to a
+                        CSV file; values from arguments or the first
+                        line of a pipe. -n keeps only the numbers:
+                        temp | log -n /root/temp.csv
+
+PLOT(1)
+    plot [-f N] [-d SEP] [-h ROWS] [-b] [file]   chart numbers in
+                        the terminal: first number of each line, or
+                        field N (CSV). -b bars. Many values are
+                        averaged to fit. plot -f 2 /root/temp.csv
+
+CLEAR(1)
+    clear               clear the screen
+
+UNAME(1)
+    uname               show the shell version
+
+DATE(1)
+    date                      show the weekday, date and time
+    date YYYY-MM-DD HH:MM:SS  set the date and/or time; the weekday
+                        is worked out automatically, impossible
+                        dates are refused. The RTC has no battery -
+                        it resets when power is lost.
+    date ntp [server]         set from the internet (W boards,
+                        default pool.ntp.org) - UTC plus $TZ hours
+
+DF(1)
+    df [-b] [path]      show total/used/free flash space, in KB
+                        (-b = bytes)
+
+MKFS(1)
+    mkfs                erase everything inside $HOME (/root) -
+                        A-NIX itself keeps working
+    mkfs -a             erase the WHOLE filesystem, A-NIX included;
+                        the board then starts to the raw REPL and
+                        A-NIX must be copied back. Both ask first.
+
+SLEEP(1)
+    sleep seconds       wait (decimals ok; Ctrl-C stops it)
+    sleep -l seconds    light sleep: far less current, then carry on
+    sleep -d seconds    deep sleep: least current, then the board
+                        restarts (@boot jobs run again). Both stop
+                        the USB/telnet connection while asleep - for
+                        battery projects, not the console. -l and -d
+                        last at most 4294 s (71 min, the chip's timer)
+
+WATCH(1)
+    watch sec command...   clear the screen and run command every
+                        sec seconds (0.1 to 86400) until q or Ctrl-C,
+                        also over telnet: watch 1 in 14
+
+DMESG(1)
+    dmesg               show the boot log - see SAFE MODE AND THE
+                        BOOT LOG, below
+    dmesg -c            clear the log
+
+CONF(1)
+    conf                all settings in /etc/anix.conf, with values
+    conf KEY            one setting
+    conf KEY VALUE      change it - takes effect at once and is saved
+    conf KEY none       unset it. Passwords show as ***.
+
+CRON(1)
+    cron                list scheduled jobs, next and last run
+    cron log [N]        last N lines of the job log
+    cron run N          run job N now, show its output
+    cron reload         re-read /etc/crontab after editing it
+    cron off | on       pause / resume - see SCHEDULED JOBS
+
+SELFTEST(1)
+    selftest [-q]       check the board and A-NIX: chip, firmware,
+                        RAM, flash, file writing, clock, temperature
+                        sensor, GPIO registers, WiFi/Bluetooth
+                        modules, every /lib module and /bin command,
+                        the /etc files, the manual and the license.
+                        Switches no pins, connects nowhere. -q shows
+                        only problems; $? = 1 if anything failed.
+                        Run it first on every new board.
+
+PS(1)
+    ps                  what the board is doing: uptime, CPU, RAM,
+                        flash, core 0 (shell, telnetd, httpd) / core 1
+                        (job, tasks, your program),
+                        WiFi, Bluetooth, watchdog, open buses, pins
+
+REBOOT(1)
+    reboot              full hardware reset, like pressing RESET
+    reboot -s           soft reset, like Ctrl-D at the REPL - boot.py
+                        and main.py run again, the RTC time and a
+                        running watchdog carry on
+                        Both are noted in the boot log (dmesg)
+    restart             alias for reboot (set in /etc/profile)
+
+LICENSE(1)
+    license             show the MIT license text in the viewer
+                        (q to leave)
+
+EDIT(1)
+    edit file           full-screen editor - see THE EDIT EDITOR,
+                        below
+
+ED(1)
+    ed file             alias for `edit` (set in /etc/profile, so not
+                        there in safe mode - use `edit`)
+
+MAN(1)
+    man [topic]         show this manual in the viewer: arrows,
+                        PgUp/PgDn (or Space/b), Home/End, / search,
+                        n next match, q to leave. With a topic, jumps
+                        straight to that command's entry, or to a
+                        section: man colours, man settings. Reads a
+                        screen at a time - any size works
+
+    /bin extras - no classic *NIX equivalent (this board has GPIO
+    pins and a REPL), kept as ordinary
+    /bin utilities alongside the above:
+
+OUT(1)
+    out pin|LED 0|1     drive a GPIO pin or the onboard LED. A new
+                        output starts directly at the given level
+
+IN(1)
+    in pin|LED [up|down|none]   read a pin as input; also sets
+                        $INn for scripts. down (default) = an
+                        unconnected pin reads 0; up = reads 1, for a
+                        switch wired to GND; none = no resistor, for
+                        a pin driven by something else
+    in -w pin [pull] [rise|fall|any] [-t s]   wait until the pin
+                        changes (interrupt, no busy loop). A change
+                        must last 20 ms, so switch bounce doesn't
+                        count. -t gives up after s seconds, up to
+                        86400 ($? 1).
+                        Button to GND: in -w 14 up fall
+
+ADC(1)
+    adc pin             read an analog input - GPIO 26, 27 or 28
+                        (ADC0-2). GPIO29 isn't offered: it's the
+                        WiFi chip's clock on the W boards
+
+PWM(1)
+    pwm pin 0-100|off [hz]   drive a PWM output (default 1000Hz).
+                        `off` stops it and leaves the pin a pulled-
+                        down input. Pins pair up on PWM slices
+                        (0+1, 2+3, ...) - both pins of a pair always
+                        run at the same frequency
+
+I2C(1)
+    i2c scan [sda scl]  list device addresses
+    i2c read addr reg|- [n]     read n bytes (default 1)
+    i2c write addr reg|- hex... write bytes
+                        Pins: given to scan, else I2C_SDA/I2C_SCL
+                        (default 4/5). The bus follows from the pins
+                        - SDA even, SCL the next pin: 0/1, 4/5, 8/9
+                        ... bus 0; 2/3, 6/7, 10/11 ... bus 1. addr
+                        and reg decimal or 0x hex; reg - means none.
+                        Example: i2c read 0x68 0x75
+
+UART(1)
+    uart bus init [baud] [tx] [rx]   configure a UART bus (0 or 1;
+                        default 9600 baud, board's default pins)
+    uart bus send [-crlf|-cr|-lf] text   write text, with the line
+                        ending asked for (none by default - most
+                        devices want -crlf)
+    uart bus send -hex hex...    write raw bytes: send -hex 01 03 FF
+    uart bus recv [ms] [-hex]    read what arrives within ms
+                        (default 1000); -hex shows bytes as hex
+
+SPI(1)
+    spi bus init [baud] [sck] [mosi] [miso] [cs]   configure an SPI
+                        bus (0 or 1; default 1000000 baud, default
+                        pins, mode 0). With cs, chip select goes low
+                        around every transfer and high afterwards
+    spi bus xfer hex    full-duplex transfer, hex in/out
+                        (e.g. "spi 0 xfer 9F 00 00 00")
+    spi bus write hex   write only
+    spi bus read n      read n bytes, 1-1024 (zeros clocked out)
+
+FLASH(1)
+    flash id            chip maker, size, JEDEC ID
+    flash status        status registers, write protection
+    flash read addr [n]       hex dump (default 256 bytes)
+    flash save addr n file    copy flash to a file
+    flash load [-e] file addr copy a file to flash, then verify
+    flash write [-e] addr hex write a few bytes, then verify
+    flash erase addr [4k|32k|64k]   erase one block (aligned)
+    flash erase all     erase the whole chip (asks first)
+    flash unprotect     clear the write-protect bits
+                        For 25-series SPI NOR chips (W25Q, GD25Q,
+                        MX25L...), first 16 MB. Flash bits only go
+                        1 -> 0; erase sets FF. write/load refuse an
+                        area that isn't erased; with -e they erase
+                        it themselves and keep the rest of every
+                        4 KB sector touched. Wiring: FLASH_* in
+                        /etc/anix.conf (default SPI0, SCK 18, MOSI 19,
+                        MISO 16, CS 17). addr/n decimal or 0x hex
+
+UARTTERM(1)
+    uartterm bus [baud] [crlf]   transparent terminal to a UART
+                        device - see THE UART TERMINAL, below.
+                        Ctrl+] to leave
+
+TEMP(1)
+    temp                read the chip's own temperature sensor (all
+                        four boards) - the chip, not the room
+
+WDT(1)
+    wdt start [timeout_ms]   arm the hardware watchdog (default
+                        8000ms). Once started it CANNOT be stopped
+                        or reconfigured - see WATCHDOG, below.
+    wdt feed                 feed it, resetting the timeout
+    wdt status                show whether it's running
+
+BLE(1)
+    ble scan [seconds]        list nearby BLE devices, strongest
+                        first, one line each (default 5s)
+    ble advertise name [s]    advertise as a peripheral (name up to
+                        26 bytes; without seconds until stopped)
+    ble advertise stop         stop advertising
+    ble status | ble off       show / switch off the radio
+
+PINS(1)
+    pins                list configured pin modes/values
+
+    Networking (Pico W / Pico 2 W only) - see NETWORKING and THE
+    WEB SERVER, below, for more:
+
+WIFI(1)
+    wifi -r N [...]     up to N tries, 5 s apart; $? = 1 if all
+                        failed:  @boot wifi -r 5 && telnetd
+    wifi [ssid] [pw]    connect (no args = use WIFI_SSID/WIFI_PASS
+                        from /etc/anix.conf); switches network if
+                        already connected elsewhere; a wrong password
+                        or missing network is reported at once
+    wifi status         show network, IP, gateway, DNS and signal
+    wifi off            disconnect and switch the radio off
+
+SCAN(1)
+    scan                list nearby WiFi networks, strongest first:
+                        signal, channel, open/secured - each network
+                        once
+
+PING(1)
+    ping host[:port] [count]   TCP-connect reachability/timing
+                        test (no raw ICMP on this platform - see
+                        NETWORKING). Default port 80; the DNS lookup
+                        is timed separately
+
+CURL(1)
+    curl url            fetch a URL, http:// or https:// - shows
+                        the status line, where a redirect points,
+                        and the first 500 characters (at most 8 KB
+                        are downloaded). https is encrypted but the
+                        server's certificate isn't checked
+
+WGET(1)
+    wget url [file]     download to a file (default: the last part
+                        of the URL). Streams to flash - size limited
+                        by free flash, not RAM; follows redirects,
+                        checks space first, never leaves a half file
+
+HTTPD(1)
+    httpd [-p pw] [args...]   web control panel: pin/LED=output,
+                        PWMn=pwm, INn=input, ADCn=analog.
+                        Needs a password - -p, or HTTPD_PASS in
+                        /etc/anix.conf. Plus a file browser for
+                        the whole filesystem (HTTPD_FILES=on). See
+                        THE WEB SERVER, below
+    httpd status        running or not, its address (or that it
+                        waits for WiFi) and the last problem
+    httpd stop          stop a running web server
+
+TELNETD(1)
+    telnetd [-p pw] [port]   the console over Wi-Fi for PuTTY
+                        (Telnet, port 23) - see THE TELNET SERVER
+    telnetd status | stop
+
+NC(1)
+    nc host port        raw TCP: type to send, see replies; Ctrl+]
+                        leaves. -crlf: Enter sends CR LF
+    ... | nc host port  send piped text, show the reply (-w s quiet
+                        time before ending, default 3)
+    nc -l port          wait for one connection, then the same
+    nc -u host port [text]   one UDP packet, show a reply
+    nc -l port -o file  receive a file (any kind, any size, raw bytes);
+                        done when the sender closes. Saved via .tmp
+    nc -l port -i file  serve a file to whoever connects
+    nc host port -i file / -o file   the same, connecting out
+                        PC side with ncat (Nmap): ncat --send-only
+                        IP 2323 < file   /   ncat --recv-only IP 2323 > file
+
+FREE(1)
+    free [-b]           show total/used/free RAM and the largest
+                        free block, in KB (-b = bytes). Free RAM in
+                        pieces adds up, but one big allocation (a
+                        core-1 stack, a file read into RAM) needs
+                        one piece - the largest block is what it can
+                        get. Not measured while core 1 runs.
+    free -m             map of the whole RAM, one character per 16
+                        bytes: . free, letters used. Long rows of .
+                        = big free blocks; dots scattered between
+                        letters = fragmented
+
+TREE(1)
+    tree [path]         recursive directory listing
+
+CHOICE(1)
+    choice [opts]       ask the user to pick one option (default Y/N)
+
+RUN(1)
+    run file [args...]  run a .py or .mpy program (its run(args,
+                        cwd)) or a .sh script by exact file name
+
+PYTHON(1)
+    python              a nested python console - expressions print
+                        their value; a line ending in ":" or with an
+                        open bracket continues on "... " lines until
+                        an empty line; exit alone returns to the
+                        shell
+
+WHIPTAIL(1)
+    whiptail msgbox text            message with an OK button
+    whiptail yesno text              Yes/No buttons (Left/Right or
+                        y/n; Esc = No)
+    whiptail inputbox prompt [default]   text field, pre-filled
+    whiptail menu title tag1 text1 [tag2 text2 ...]   arrow-key
+                        navigable list
+                        Multi-word text needs quotes. The answer
+                        goes in $WHIPTAIL (menu tag, typed text,
+                        YES/NO), not to the output - $? is 0 for
+                        confirmed, 1 for cancelled, so
+                        `if $? == 1 then` works. See THE WHIPTAIL
+                        DIALOGS, below, for more.
+
+HELP(1)
+    help                quick one-line-per-command reference
+
+    A bare name that isn't a builtin or a /bin command runs <name>
+    or <name>.sh/.py from cwd, then from each $PATH directory - the
+    normal way real shells resolve a typed command.
+
+GPIO AND HARDWARE
+    A pin's mode (in/out/analog/pwm) is set the first time you use
+    it and remembered for the rest of the session - switch modes by
+    just calling a different command on the same pin number; the
+    pin is released from its old mode first (a running PWM is
+    stopped), so `pins` always shows one mode per pin.
+
+    GPIO 23, 24, 25 and 29 are refused by out/in/pwm/adc/httpd: on
+    the W boards they drive the WiFi chip (driving them by hand
+    kills WiFi and the LED), on the others they are board internals.
+    Use LED for the onboard LED.
+
+    UART and SPI buses work the same way: `uart <bus> init` / `spi
+    <bus> init` configure bus 0 or 1 once, and every later `send`/
+    `recv`/`xfer`/`write`/`read` on that bus number reuses it for
+    the rest of the session - no need to re-init between calls.
+
+NETWORKING
+    WiFi, reachability, HTTP/HTTPS fetches, downloads and NTP time
+    are handled by net.py (in /lib), behind wifi/scan/ping/curl/
+    wget/date ntp - see COMMANDS, above, for each. Only the Pico W
+    and Pico 2 W have WiFi; on the others these commands just say
+    "no WiFi on this board".
+
+    MicroPython exposes no raw ICMP socket, so `ping` can't send a
+    real ICMP echo the way a PC's ping does - it substitutes a TCP
+    connection-timing test, which answers the same practical
+    question without being literally the same measurement.
+
+THE WEB SERVER (httpd)
+    `httpd` starts a minimal HTTP server (server.py, in /lib) on core
+    0, like telnetd: the prompt watches its socket and answers a
+    browser at once while it waits for keys. Core 1 stays free for
+    your own programs. While a command runs, a browser waits until it
+    ends; a big download or upload holds the prompt for its few
+    seconds (keys typed meanwhile aren't lost). The pin panel needs no
+    JavaScript - every request re-renders the current state of
+    whatever pins you gave it:
+
+        pin number, or LED    ON/OFF buttons
+        PWMn                  duty-cycle field (0-100) + Set button
+        INn                   read-only digital value
+        ADCn                  read-only raw value + voltage (0-2)
+
+    With no pins given, httpd uses WEB_PINS from /etc/anix.conf;
+    WEB_PINS=none means no pins at all - http://IP/ then opens the
+    file browser directly and the LED stays free for your programs.
+
+    The panel uses the shell's own pins - the same ones out/in/pwm/
+    adc/pins see - so the shell and the browser always agree.
+    Outputs already set keep their level, new ones start low.
+
+    A password is required (-p, or HTTPD_PASS). The browser asks for
+    a login: any user name, that password. It's plain HTTP, so this
+    keeps out people who don't know the password, not someone
+    capturing traffic on the same network.
+
+    If any inputs or ADCs are configured, the page auto-refreshes
+    every 2s. `httpd stop` closes it at once.
+
+    httpd prints the address to open (or, without WiFi yet, that the
+    panel is reachable once `wifi` connects). After that the server
+    stays quiet - it never writes into your prompt; problems (a
+    request that failed, a server that could not start) show in
+    `httpd status` as "last: ...".
+
+    The file browser (Files link on the panel, or http://IP/files)
+    shows the whole filesystem from /. Click a folder to open it, a
+    file to download it, view to see it as text. upload here sends
+    one or more files from your PC into the folder shown (written to
+    a .tmp file and renamed when complete - a broken upload changes
+    nothing); new folder, rename and delete do what they say (delete
+    asks first; a folder must be empty). Full access means full:
+    deleting /lib, /bin, boot.py or main.py breaks A-NIX exactly as
+    rm would. Speed is roughly 50-150 KB/s; one request at a time.
+    conf HTTPD_FILES off leaves the browser out of the panel.
+    Anything that changes something (pins, upload, delete...) is only
+    accepted from the panel's own pages: a link on another web site,
+    or a URL typed into the address bar, gets 403 - so a strange web
+    page can't use your saved login to switch pins or delete files.
+
+THE TELNET SERVER (telnetd)
+    `telnetd` puts the A-NIX console on the network, for PuTTY
+    (Connection type: Other -> Telnet, NOT SSH; port 23) or any
+    telnet client. It is the SAME console as USB, not a second one:
+    both see everything, and keys from either reach the shell.
+
+    A password is required: -p, else TELNET_PASS in /etc/anix.conf
+    (conf TELNET_PASS <password>). A new client gets the banner and
+    "password:"; nothing of the console reaches it before the right
+    password, and three wrong tries close the connection. After it,
+    the prompt appears at once.
+
+    One client at a time. A client that hasn't logged in within 30 s,
+    or has sent nothing for 10 minutes, is replaced by the next one
+    that connects. Closing the PuTTY window ends the session; you can
+    connect again at once. New clients are taken while the shell
+    waits at its prompt (about once a second), not while a command
+    runs. Ctrl-C acts as on USB, but reaches a running command only
+    if that command reads keys (watch, edit, nc ...).
+
+    `telnetd status` shows the port, the client and the last problem
+    (e.g. a client that left before logging in). Not encrypted - fine
+    at home, not on a public network. Gone after a reset: put
+    `@boot wifi -r 5` and `@boot telnetd` in /etc/crontab to have it
+    after every boot. telnetd and httpd both run on core 0, at the
+    same time, and leave core 1 free.
+
+SCHEDULED JOBS (cron)
+    /etc/crontab lists commands to run by themselves, one per line:
+        @boot <command>          once when the board starts (right
+                                 after /etc/startup, before the prompt)
+        every <N>s|m|h|d <cmd>   repeatedly, from N seconds up to 6
+                                 days (every 30m, every 6h)
+        at HH:MM <command>       every day at that time - needs the
+                                 clock set (date ntp)
+    A # starts a comment, but only at the start of a line.
+
+    Jobs run on core 0 while the shell waits at its prompt with
+    nothing typed, never in the middle of another command - so an
+    `every` or `at` job that falls due while a command runs waits
+    until it ends (an `at` job whose minute passes meanwhile is
+    skipped that day). Their output goes to /var/log/cron.log, never
+    to the screen: see it with `cron log` - by default only for jobs
+    that failed ($? not 0), so a job every minute doesn't write the
+    flash every minute; `conf CRON_LOG all` logs every run, off
+    nothing. `cron` shows every job's last run and $? anyway. Commands
+    that need keys (edit, read, choice ...) are refused. After editing
+    the file, `cron reload` (or reboot). Safe mode (BOOTSEL) skips the
+    file.
+
+BLUETOOTH
+    `ble scan` and `ble advertise` (W boards only) use the board's
+    built-in BLE radio directly - no GATT client/server here, just
+    discovery and simple peripheral advertising. The radio, once
+    turned on by either command, stays active for the rest of the
+    session. `ble advertise` with no seconds given keeps advertising
+    until you run `ble advertise stop`.
+
+WATCHDOG
+    `wdt start [timeout_ms]` arms the hardware watchdog - this is a
+    one-way door on every Pico: MicroPython has no way to disarm a
+    running watchdog, only feed it. Once started, `wdt feed` (or a
+    script feeding it on a timer) has to keep happening inside the
+    timeout or the board resets. There's no `wdt stop`.
+
+    The shell watchdog does the feeding for you: `conf WATCHDOG on`
+    (it starts at the next shell start). A timer feeds the watchdog
+    every second, but only while MicroPython is alive - if the board
+    locks up (a driver stuck, the VM frozen) it resets within 8 s
+    and the boot log says "watchdog". With `conf WATCHDOG_HANG N` it
+    also resets when the shell has shown no sign of life for N
+    minutes: no prompt, no command starting, no output. A command
+    that runs silently that long counts as stuck - and so does an
+    editor or `read` left waiting - so use it on unattended boards.
+    sleep, watch and `in -w` tell the shell they're waiting on purpose
+    and don't count as stuck.
+    Turning it off: `conf WATCHDOG off`, then `reboot`. boot.py starts
+    the watchdog and feeds it at every start - also after a soft reset
+    from Thonny, mpremote or the PC menu - so those keep working with
+    WATCHDOG=on (at the bare REPL the board resets only if it really
+    freezes). Safe mode (BOOTSEL) skips it. `sleep -l` / `-d` are
+    refused while it runs.
+
+SETTINGS
+    /etc/anix.conf holds the settings, one KEY=VALUE per line, with a
+    comment above each explaining it. `conf` lists and changes them
+    (no editing needed); "none" means not set. Besides WiFi, TZ,
+    passwords, httpd, I2C and flash pins (see ENVIRONMENT):
+    PROFILE, STARTUP, CRONTAB, HISTORY
+                on (default) / off: whether the shell reads
+                /etc/profile, runs /etc/startup and loads
+                /etc/crontab at start. off = not read at all, so it
+                takes no RAM and leaves no holes in it. PROFILE=off
+                means no aliases and no saved history, PATH=/bin,
+                HOME=/root. With CRONTAB=off no jobs run and `cron`
+                says so. HISTORY=off: no prompt history (Up/Down,
+                !!, `history`) in RAM, none saved. Takes effect at
+                the next start (`reboot`).
+    CRON_LOG    errors (default) = cron logs only jobs that failed,
+                all = every run, off = nothing (see SCHEDULED JOBS)
+    LOG_MAX     bytes a log in /var/log may reach before it keeps
+                only its newest half (default 16384). Applies to
+                boot.log, cron.log and tasks.log; the background
+                job's log stops at 4x this.
+    MEM_LOW     free RAM in bytes (default 24576) below which the
+                shell, after a command, unloads big modules nothing is
+                using - editor, script, syntax, tui, view, hexfmt,
+                biggest first, only until a third more is free (each
+                unload and reload leaves holes in RAM); they load
+                again when needed. The prompt shows (low RAM) until
+                then. The small, often used ones stay unless RAM runs
+                out completely. Not while a background job or tasks
+                run.
+    EDIT_MEM    biggest file `edit` opens, in % of free RAM (default
+                40, 10-90). The editor needs about twice the file size
+                plus room for undo and copy/paste; if it runs out of
+                memory anyway it keeps the text and asks you to save.
+    WATCHDOG, WATCHDOG_HANG   see WATCHDOG
+    COLOR       on (default) / off: Linux-style colours on the
+                screen - see COLOURS.
+    An older /etc/profile with settings in it still works (profile is read
+    last, so its values win).
+
+    RAM at start: /etc/anix.conf, /etc/profile, /etc/crontab and the
+    history are read one line at a time and comments are skipped, so
+    comments cost no RAM; scripts keep a comment as an empty line. The
+    shell runs gc.collect() before each part that stays in RAM, so it
+    packs together and leaves the largest free block big (see FREE(1)).
+
+SAFE MODE AND THE BOOT LOG
+    Every boot adds a line to /var/log/boot.log: its number, the RTC
+    time, why the board started (power on, watchdog, reboot, reboot
+    -s, soft reset) and the mode (shell, or safe mode). `dmesg` shows
+    the log; it is kept under 16 KB (the newest half stays).
+
+    Safe mode: hold BOOTSEL while the board starts - press it right
+    after power is applied (held BEFORE power-on, it starts the USB
+    bootloader instead). The shell then starts without /etc/profile
+    (no aliases; PATH, HOME and history use their defaults), without
+    /etc/startup and /etc/crontab (no @boot jobs, nothing starts by
+    itself) and without the shell watchdog - so a broken @boot line,
+    startup script or watchdog setting can't lock the board. The
+    banner and the boot log say so. Reboot without BOOTSEL to leave.
+
+    If the shell itself can't be loaded or crashes (a broken file
+    after an upload, out of memory), main.py writes the error to the
+    boot log and stops at the bare MicroPython REPL with a message.
+
+    The RTC has no battery, so after a power cut the logged times
+    restart from the firmware's default date.
+
+THE WHIPTAIL DIALOGS
+    Boxes are drawn as an overlay wherever the cursor already is,
+    same as real whiptail - not a full-screen takeover, so whatever
+    was on screen stays visible around the box. Plain ASCII borders
+    (+/-/|), not Unicode box-drawing, for the same reason `tree`
+    avoids box-drawing glyphs: not every terminal on the other end
+    of this board's connection can be assumed to render them.
+
+    menu   Up/Down move (wraps at the ends), PgUp/PgDn jump a
+           screenful, Enter selects, Esc or q cancels
+    msgbox Enter, Esc, space, or q all dismiss it - there's only
+           one outcome
+    yesno  Left/Right or Tab toggles the highlighted button, Enter
+           confirms it, y/n answer directly, Esc = No
+    inputbox   type to insert, Left/Right/Home/End/Backspace/Delete
+           to edit, Enter confirms, Esc cancels
+
+    A bare Escape keypress and the start of an arrow-key sequence
+    both begin with the same byte on the wire - Esc is only counted
+    as Cancel if no second byte follows within 50ms, since a real
+    escape sequence's bytes arrive together. Screen size is asked of
+    the terminal the same way `edit` does, for the same reason: to
+    center the box correctly instead of guessing.
+
+WRITING SHELL SCRIPTS
+    A script is a .sh file, run by typing its name (or `run x.sh`,
+    or `. x.sh`), with arguments: backup.sh /root/data -> $1. It
+    is checked as a whole first: a missing fi or
+    done is reported with its line number before anything runs.
+
+    if COND [then]          if/elif/else/fi, for/while/done can be
+        ...                 nested in any way
+    elif COND [then]
+        ...
+    else
+        ...
+    fi
+    for VAR START END [STEP] [do]     $VAR counts START..END
+        ...                           (STEP default 1, or -1 when
+    done                              counting down; 0 refused)
+    while COND [do]                   repeats while COND is true
+        ...
+    done
+    break / continue    leave the loop / go to its next round
+    :label / goto label jump to a top-level label - also out of
+                        loops; not into a block
+    function NAME       define a function - then call NAME like a
+        ...             command, with arguments ($1.. inside); it
+    end                 is known until the shell restarts
+    return [N]          leave a function (or script) with $? = N
+    exit                end the script (not the shell)
+    set -x / set +x     show each command before it runs, on/off.
+                        Off by default; a leading @ silences one line
+    # text              comment
+
+    COND can be:
+        exist PATH          file or folder exists
+        A == B   A != B     equal / not equal
+        A < B  A > B  A <= B  A >= B
+                            compared as numbers when both are
+                            numbers, else as text
+        COMMAND [args]      run it - true if it succeeded ($? 0):
+                            if grep -q error log.txt then
+        not COND   C1 and C2   C1 or C2
+    Variables are expanded each time a condition is checked, so
+    `while $N < 10` sees N change:
+        let N=0
+        while $N < 10 do
+            let N=N+1
+        done
+
+THE EDIT EDITOR
+    A small nano-style editor. The title bar shows the cursor
+    position (L12:C5), the file name and whether it's modified.
+    Only changed screen rows are redrawn, in one write, so it
+    doesn't flicker over a serial link.
+
+    Screen size is asked of the terminal itself (the standard cursor-
+    position query) rather than trusted from COLUMNS/LINES alone; a
+    terminal that doesn't answer within ~200ms falls back to
+    COLUMNS/LINES (default 80x24).
+
+    The whole file is held in memory as separate lines, so a file
+    bigger than ~40% of free RAM (`free`) is refused rather than
+    attempted. `pg` streams a page at a time and has no such limit.
+
+        arrows Home End PgUp PgDn   move (long lines scroll sideways)
+        Ctrl+F     go to line         Ctrl+W     find; Ctrl+W then
+                                                 Enter finds next
+        Ctrl+B     mark on/off - then move to select
+        Ctrl+A     select all         Ctrl+K     cut (selection, else
+                                                 the whole line)
+        Ctrl+Y     copy (same rule)   Ctrl+V     paste
+        Ctrl+Z     undo               Tab        indent
+        Ctrl+O     save               Ctrl+X     exit (asks to save)
+        Ctrl+H     help screen (also Ctrl+G)
+
+    Typing or pasting over a selection replaces it. Enter keeps the
+    line's indentation and adds one level after a line ending in
+    ":". Text pasted from the terminal keeps its own indentation and
+    is drawn once at the end, not character by character.
+
+    Undo goes back over the last 20 changes, using at most 8 KB of
+    RAM (UNDO_MAX_STEPS / UNDO_MAX_KB at the top of /lib/editor.py);
+    when full, the oldest change is dropped. A run of typing on one
+    line counts as one change.
+
+    Saving writes file.tmp first and renames it over the original,
+    so a power cut mid-save leaves the old file intact.
+
+    Syntax colours, like nano's (COLOR=off turns them off; files
+    of other kinds open without colours):
+      .py      keywords bold cyan, def/class names bold blue, calls
+               yellow, assigned names bold white, strings green,
+               numbers red, True/False/None/self magenta, comments
+               cyan, @decorators bold magenta
+      .sh and /etc/startup   if/for/while/... bold cyan, the command
+               word bold blue, $VARIABLES green, "strings" yellow,
+               :labels bold yellow, | ; && > operators magenta
+      /etc/crontab   @boot/every/at bold yellow, the time magenta,
+               the command like a script line
+      .conf .cfg .ini, /etc/profile   KEY= bold cyan, on/off/none
+               magenta, numbers red, comments cyan
+    The rows on screen are kept coloured in a small cache, so typing
+    re-colours only the line you are on (/lib/syntax.py). If RAM runs
+    short, rows are simply shown without colours.
+
+    Ctrl+C is never used - it's MicroPython's interrupt key. Ctrl+H
+    is the byte some terminals send for Backspace: PuTTY's default
+    Backspace ("Control-?") is right; if Backspace opens the help
+    screen, set it back. Ctrl+E also exits, for mpremote, whose own
+    terminal takes Ctrl+X. A key the editor doesn't recognise shows
+    its code on the message line.
+
+FILES
+    /boot.py, /main.py         must stay at the filesystem root
+    /lib/shell.py               the shell
+    /lib/net.py, server.py        support modules, imported only -
+                                   behind wifi/scan/ping/curl/httpd
+    /lib/gpio.py                   shared pin rules behind
+                                   out/in/pwm/adc/httpd/spi
+    /lib/lineedit.py               the prompt: history, Tab
+    /lib/hexfmt.py                 hex dump layout (hexdump, flash)
+    /lib/shbuiltin.py              export unset let read alias
+                                   unalias history !! time
+    /lib/subst.py                  $((expr)), let, $(command)
+    /lib/fileops.py                cp, cp -r, rm -r
+    /lib/tabcomp.py                Tab completion
+    /var/tmp                       pipe data over 8 KB
+    /etc/crontab                   scheduled jobs (cron)
+    /var/log/cron.log              job output
+    /lib/crond.py, telnetsrv.py   behind cron, telnetd
+    /lib/jobctl.py, editor.py      cmd &, the editor
+    /var/log/job.log               background job output
+    /var/log/tasks.log             what scheduler tasks print
+    /lib/tasksched.py              the task scheduler
+    /var/log/boot.log              boot log (dmesg)
+    /var/history                   saved prompt history (HISTFILE)
+    /lib/tui.py                    dialog-drawing engine behind
+                                   whiptail - also importable directly
+    /lib/view.py                   the full-screen viewer behind
+                                   man and license
+    /lib/syntax.py                 syntax colours for edit
+    /lib/server.py, webfiles.py    httpd panel and file browser
+    /bin/*.py                    every command (see COMMANDS)
+    /etc/startup                  startup script, run at every
+                                   shell start (commented examples
+                                   inside)
+    /etc/anix.conf                settings (conf)
+    /etc/profile                  shell environment and aliases
+    /lib/script.py, logs.py, watchdog.py
+                                   script language, log trimming,
+                                   shell watchdog
+    /usr/share/man/anix            this page
+    /usr/share/doc/copyright        license and copyright text
+
+EXAMPLES
+    Look around from home:
+        pwd
+        ls
+        tree
+
+    Read a pin and react to it in a script:
+        in 14
+        if $IN14==1 then
+            echo pressed
+        fi
+
+    Write a small file without opening the editor:
+        echo hello there > greeting.txt
+        cat greeting.txt
+
+    Log the temperature every 10 minutes, then look at it
+    (/etc/crontab line, then at the prompt):
+        every 10m temp | log -n /root/temp.csv
+        plot -f 2 /root/temp.csv
+
+    Wait for a button on GPIO14 (to GND) in a script:
+        in -w 14 up fall && echo pressed
+
+    Find Python files and count them:
+        ls /bin | grep .py | wc
+
+    A loop in a script (count.sh):
+        for i 1 5
+            if $i == 3 then
+                continue
+            fi
+            echo round $i
+        done
+
+    Save a listing, then look at it:
+        ls -l /bin > /root/bin.txt
+        head -n 5 /root/bin.txt
+
+    Set the clock from the internet (W boards):
+        wifi myssid mypassword
+        date ntp
+
+    Watch an input every second (Ctrl-C stops):
+        watch 1 in 14
+
+    Set a custom prompt for this session:
+        export PS1=\w>
+        unset PS1
+
+    Join a network, then serve a control page for the onboard LED
+    and two extra pins, with a live input and an analog reading:
+        wifi myssid mypassword
+        httpd -p secret LED 16 IN14 ADC0
+        httpd stop
+
+AUTHOR
+    NoGraphic999
+
+LICENSE
+    A-NIX is free software, released under the MIT License. See
+    /usr/share/doc/copyright, or the `license` command.
+
+SEE ALSO
+    help(1)   quick one-line-per-command reference

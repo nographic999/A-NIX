@@ -1,0 +1,13 @@
+# startup - a script run at every shell start (also after `exit`),
+# before /etc/crontab's @boot jobs and the prompt. Its output shows on
+# the screen; it may ask questions (read, choice). Ctrl-C stops it.
+# Holding BOOTSEL while the board starts skips it (safe mode).
+# For things that should start once per boot, quietly and logged,
+# use @boot lines in /etc/crontab instead.
+#
+# Examples (remove the # to use):
+# echo Welcome to $(uname)
+# date
+# if exist /root/notes.txt then
+#     cat /root/notes.txt
+# fi

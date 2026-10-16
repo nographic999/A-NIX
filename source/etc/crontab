@@ -1,0 +1,29 @@
+# crontab - scheduled jobs, output in /var/log/cron.log (see: man cron)
+#   @boot <command>              once when the board starts
+#   every <N>s|m|h|d <command>   repeatedly, e.g. every 30m
+#   at HH:MM <command>           daily (set the clock first: date ntp)
+# See the output with: cron log. Reload after editing: cron reload
+# Holding BOOTSEL while the board starts skips this whole file.
+# Comments only on their own line - a # after a command is not one.
+
+# --- Network services at start (remove the # to use) ---
+# Passwords first: conf TELNET_PASS <pw>, conf HTTPD_PASS <pw>
+# @boot run /root/program.py start
+# @boot wifi -r 5
+# @boot date ntp
+# @boot telnetd
+# @boot httpd
+
+# --- Keep it running ---
+# Reconnect if WiFi dropped (does nothing while connected):
+# every 5m wifi
+# Keep the clock right:
+# every 6h date ntp
+
+# --- Logging ---
+# Board temperature every 10 min, view: plot -f 2 /root/temp.csv
+# every 10m temp | log -n /root/temp.csv
+
+# --- Maintenance ---
+# Daily restart for an unattended board (needs the clock set):
+# at 04:00 reboot

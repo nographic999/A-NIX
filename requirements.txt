@@ -1,0 +1,6 @@
+# Python packages for anix.py - menu.sh and menu.bat install them
+# by themselves when missing
+mpremote
+pyserial
+# must match the MicroPython version on the board (1.29)
+mpy-cross==1.29.0.post2

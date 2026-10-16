@@ -1,0 +1,21 @@
+# --- third-party programs: download them, don't commit them ---
+python/
+putty.exe
+firmware/
+*.uf2
+
+# --- your own files and backups ---
+dump/
+.lastip
+mpy/
+source/root/
+source/etc/passwd
+source/var/
+
+# --- generated ---
+.venv/
+__pycache__/
+*.pyc
+*.mpy
+*.tmp
+*.zip
